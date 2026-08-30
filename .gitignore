@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual env
+.venv/
+
+# Reference clone (has its own git repo)
+minesweeper-pygame/
+
+# Unused sprite set from the original clone
+assets/Tile*.png
+
+# macOS
+.DS_Store

@@ -1,818 +1,766 @@
 """
-MINESWEEPER - Introduction to Programming Project
+HOOK 'EM SWEEPER - a Minesweeper clone, UT Austin edition
 
-This program implements a graphical version of the classic Minesweeper game
-using Pygame for the interface and NumPy for storing the internal game board.
+Based on the simple structure of the "minesweeper-pygame" clone
+(Tile / Board / Game classes), extended with:
 
-How the game works:
-    - The player first picks a board size from a menu.
-    - The player is then shown a grid of covered cells.
-    - A number of mines are hidden randomly under some of the cells.
-    - The player clicks a cell to "select" it.
-        - If the cell has a mine, the game ends immediately (GAME OVER).
-        - If the cell is safe, it shows how many mines are touching it
-          (the eight neighboring cells: up, down, left, right, and the
-          four diagonals). If it has zero neighboring mines, all of its
-          connected neighbors are revealed automatically as well.
-    - The player wins by revealing every safe cell without clicking a mine.
-    - The player can right-click (or Control-click on Mac) a covered cell
-      to place or remove a flag as a reminder of where a mine might be.
-    - The window can be freely resized; the whole interface scales to fit.
+    - Two board modes: SQUARE (8 neighbours) and HEXAGONAL (6 neighbours).
+    - The player freely types the board width and height, within a limit
+      (MIN_DIM .. MAX_DIM) so the window still fits on screen.
+    - The mine count is also free, with an automatic cap based on the
+      chosen board size.
+    - If the board is large, each cell shrinks on its own to fit the
+      screen (auto-fit).
+    - Minimal top bar (HUD) with remaining bulls and a timer.
+    - Always-safe first click: bulls are placed after the first click,
+      avoiding the clicked cell and its neighbours.
+    - Win / lose screens and restart with the R key.
+
+Minimalist look: flat cells with a thin gap, no borders, a single accent
+color. The mines are "bulls" (Texas Longhorns) and a flag is the "Hook 'em"
+hand. Both can be swapped for a PNG in assets/: toro.png for the bull
+(or bull / longhorn / bevo / mine) and hookemhand.png for the flag
+(or hookem / hand / flag); otherwise they are drawn. Everything is rendered
+on a canvas SS times larger and scaled down with smoothing when shown
+(SSAA), so edges and text do not look jagged or blurry.
+
+The palette is built on the two UT Austin core colors: Burnt Orange
+(#BF5700) as the only accent, over limestone paper and charcoal text.
+
+Controls:
+    - Left click   -> reveal a cell
+    - Right click  -> place / remove a flag
+    - R            -> restart (back to the menu)
+    - ESC          -> quit
 
 AUTHORS:
     - Gio
-    - <Your Name Here>
 """
 
 import math
+import os
 import random
 import sys
+import time
 
-import numpy as np
 import pygame
 
 
 # ------------------------------------------------------------------------
-# GAME SETTINGS
+# GENERAL SETTINGS
 # ------------------------------------------------------------------------
-# The available board sizes the player can pick from the menu. "mines" is
-# chosen at roughly 15-20% of the cells so difficulty scales with size.
-DIFFICULTY_OPTIONS = [
-    {"label": "Small  (5 x 5)  -  5 mines", "size": 5, "mines": 5},
-    {"label": "Medium (8 x 8)  -  10 mines", "size": 8, "mines": 10},
-    {"label": "Large  (10 x 10)  -  18 mines", "size": 10, "mines": 18},
-    {"label": "Extra Large (12 x 12)  -  28 mines", "size": 12, "mines": 28},
-]
+FPS = 60
+TITLE = "Hook 'Em Sweeper"
 
-BOARD_SIZE = DIFFICULTY_OPTIONS[0]["size"]        # Set by choose_difficulty()
-NUMBER_OF_MINES = DIFFICULTY_OPTIONS[0]["mines"]  # Set by choose_difficulty()
+# Optional images. Drop a PNG in the assets/ folder with any of these names
+# and it is used instead of the drawn shape (longhorn / Hook 'em hand).
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+MINE_IMAGE_NAMES = ("toro.png", "bull.png", "longhorn.png", "bevo.png", "mine.png")
+FLAG_IMAGE_NAMES = ("hookemhand.png", "hookem.png", "hand.png", "flag.png")
 
-MINE_VALUE = -1          # How a mine is represented inside the NumPy array
+# Supersampling (SSAA): everything is drawn on a canvas SS times larger and
+# scaled down when shown. That smooths edges and text (less "blur").
+SS = 2
+
+HUD_HEIGHT = 52 * SS
+
+# Board resize limit (in cells per side).
+MIN_DIM = 5
+MAX_DIM = 30
+
+# Maximum room the play area may take, in canvas pixels (HUD not included).
+# The real window will be SS times smaller.
+MAX_VIEW_W = 1180 * SS
+MAX_VIEW_H = 780 * SS
+MIN_WIN_W = 360 * SS         # so the HUD text fits
+
+# "Design" size of each cell and the smallest it may shrink to.
+BASE_TS = 34 * SS
+MIN_TS = 14 * SS
+BASE_HEXR = 24 * SS          # hexagon radius (center -> vertex)
+MIN_HEXR = 12 * SS
 
 # ------------------------------------------------------------------------
-# VISUAL SETTINGS
+# COLORS - minimalist, built on the two UT Austin core colors
 # ------------------------------------------------------------------------
-# The BASE_* values are the "design size" of the interface, in pixels, at
-# a scale of 1.0. Since the window is resizable, compute_layout() and
-# compute_menu_layout() scale every one of them by the current scale
-# factor to get the actual sizes used for drawing that frame.
-BASE_CELL_SIZE = 60
-BASE_CELL_GAP = 3
-BASE_BOARD_PADDING = 10
-BASE_MARGIN = 24
-BASE_SECTION_GAP = 10
-
-BASE_TITLE_HEIGHT = 46
-BASE_SUBTITLE_HEIGHT = 40
-BASE_INFO_HEIGHT = 32
-BASE_STATUS_HEIGHT = 28
-BASE_BUTTON_WIDTH = 150
-BASE_BUTTON_HEIGHT = 42
-BASE_BUTTON_GAP = 14
-
-BASE_MENU_BUTTON_WIDTH = 340
-BASE_MENU_BUTTON_HEIGHT = 50
-BASE_MENU_BUTTON_GAP = 16
-
-BASE_TITLE_FONT_SIZE = 30
-BASE_SUBTITLE_FONT_SIZE = 14
-BASE_INFO_FONT_SIZE = 16
-BASE_CELL_FONT_SIZE = 20
-BASE_STATUS_FONT_SIZE = 15
-
-# How far the player is allowed to shrink/grow the window relative to
-# the design size.
-MIN_SCALE = 0.6
-MAX_SCALE = 2.5
-
-BG_COLOR = (44, 62, 80)             # Main window background (dark navy)
-PANEL_COLOR = (52, 73, 94)          # Board frame background
-COVERED_COLOR = (93, 173, 226)      # Covered (unrevealed) cell color
-REVEALED_COLOR = (236, 240, 241)    # Revealed (safe) cell color
-FLAG_COLOR = (244, 208, 63)         # Flagged cell color
-MINE_COLOR = (231, 76, 60)          # Mine cell color (shown at game over)
-LOSING_MINE_COLOR = (192, 57, 43)   # The exact mine that was clicked
-TEXT_COLOR = (236, 240, 241)        # Light text on dark background
-BLACK = (0, 0, 0)
 WHITE = (255, 255, 255)
-BORDER_COLOR = (30, 42, 55)
+BLACK = (0, 0, 0)
 
-BUTTON_COLOR = (39, 174, 96)
-BUTTON_HOVER_COLOR = (46, 204, 113)
-SECONDARY_BUTTON_COLOR = (93, 173, 226)
-SECONDARY_BUTTON_HOVER_COLOR = (133, 193, 233)
+UT_ORANGE = (191, 87, 0)        # Burnt Orange  #BF5700
+UT_CHARCOAL = (51, 63, 72)      # #333F48
 
-# Text color used for each mine-count number, matching classic Minesweeper.
+BG = (237, 234, 226)            # limestone paper
+INK = (51, 63, 72)             # primary text / lines
+MUTED = (150, 144, 130)         # secondary text
+ACCENT = (191, 87, 0)           # burnt orange - the only strong color
+ACCENT_DIM = (150, 68, 0)       # pressed / hover
+
+BGCOLOUR = BG
+LIGHTGREY = MUTED
+GREEN = (86, 132, 62)           # win text
+RED = ACCENT                    # lose text
+
+# Number colors (1..8), muted, readable on the near-white revealed cell.
 NUMBER_COLORS = {
-    1: (41, 128, 185),    # blue
-    2: (39, 174, 96),     # green
-    3: (192, 57, 43),     # red
-    4: (142, 68, 173),    # purple
-    5: (127, 140, 141),   # gray
-    6: (22, 160, 133),    # teal
-    7: (44, 62, 80),      # dark navy
-    8: (0, 0, 0),         # black
+    1: (0, 95, 134), 2: (58, 115, 48), 3: (191, 87, 0), 4: (0, 59, 92),
+    5: (140, 55, 20), 6: (0, 119, 138), 7: (51, 63, 72), 8: (120, 120, 120),
+}
+# Cells are flat and separated by a small gap (no borders).
+CELL_COVER = (206, 200, 187)    # warm gray
+CELL_REVEAL = (243, 241, 234)   # near-paper
+CELL_EXPLODE = UT_CHARCOAL      # the bull you clicked
+CELL_GAP = 0.90                 # cells shrink toward their center
+
+SQRT3 = math.sqrt(3)
+
+# Cell types: "." empty   "X" mine   "C" clue (number)
+
+
+# ------------------------------------------------------------------------
+# BOARD GEOMETRY
+# ------------------------------------------------------------------------
+class SquareGrid:
+    """Classic grid: each cell touches 8 neighbours."""
+
+    def __init__(self, cols, rows):
+        self.cols = cols
+        self.rows = rows
+        self.ts = max(MIN_TS, min(BASE_TS, MAX_VIEW_W // cols, MAX_VIEW_H // rows))
+
+    def coords(self):
+        for r in range(self.rows):
+            for c in range(self.cols):
+                yield (c, r)
+
+    def in_bounds(self, c, r):
+        return 0 <= c < self.cols and 0 <= r < self.rows
+
+    def neighbours(self, c, r):
+        out = []
+        for dc in (-1, 0, 1):
+            for dr in (-1, 0, 1):
+                if dc == 0 and dr == 0:
+                    continue
+                if self.in_bounds(c + dc, r + dr):
+                    out.append((c + dc, r + dr))
+        return out
+
+    def pixel_size(self):
+        return (self.cols * self.ts, self.rows * self.ts)
+
+    def inradius(self):
+        return self.ts / 2
+
+    def center(self, c, r):
+        return (c * self.ts + self.ts / 2, r * self.ts + self.ts / 2)
+
+    def polygon(self, c, r):
+        x, y, s = c * self.ts, r * self.ts, self.ts
+        return [(x, y), (x + s, y), (x + s, y + s), (x, y + s)]
+
+    def cell_at(self, px, py):
+        c, r = int(px // self.ts), int(py // self.ts)
+        return (c, r) if self.in_bounds(c, r) else None
+
+
+# Neighbour offsets for "pointy-top" hexagons, "odd-r" layout
+# (odd rows are shifted half a cell to the right). [dcol, drow]
+ODDR_NEIGHBOURS = {
+    0: [(+1, 0), (0, -1), (-1, -1), (-1, 0), (-1, +1), (0, +1)],   # even row
+    1: [(+1, 0), (+1, -1), (0, -1), (-1, 0), (0, +1), (+1, +1)],   # odd row
 }
 
-# ------------------------------------------------------------------------
-# GLOBAL GAME STATE
-# ------------------------------------------------------------------------
-# These variables hold the current state of the game. They are updated by
-# the functions below every time the player interacts with the board.
-#
-# board:      NumPy 2D array of integers.
-#             -1 means "this cell has a mine".
-#             0-8 means "this cell is safe and touches this many mines".
-# revealed:   2D list of True/False. True means the player has already
-#             uncovered that cell.
-# flagged:    2D list of True/False. True means the player marked that
-#             cell with a flag.
-# mine_hit:   (row, col) of the mine that ended the game, or None.
-# game_over:  True once the player has won or lost. Used to ignore clicks
-#             after the game has ended.
-board = None
-revealed = None
-flagged = None
-mine_hit = None
-game_over = False
-status_message = "Good luck!"
 
-# Current (scaled) pixel sizes and screen positions. These start out
-# equal to the BASE_* design values and are recomputed every frame by
-# compute_layout() / compute_menu_layout() according to how much the
-# player has resized the window.
-CELL_SIZE = BASE_CELL_SIZE
-CELL_GAP = BASE_CELL_GAP
-BOARD_PADDING = BASE_BOARD_PADDING
-MARGIN = BASE_MARGIN
-SECTION_GAP = BASE_SECTION_GAP
-TITLE_HEIGHT = BASE_TITLE_HEIGHT
-SUBTITLE_HEIGHT = BASE_SUBTITLE_HEIGHT
-INFO_HEIGHT = BASE_INFO_HEIGHT
-STATUS_HEIGHT = BASE_STATUS_HEIGHT
-BUTTON_WIDTH = BASE_BUTTON_WIDTH
-BUTTON_HEIGHT = BASE_BUTTON_HEIGHT
-BUTTON_GAP = BASE_BUTTON_GAP
-
-# Screen coordinates of the top-left corner of the first cell, and the
-# total size of the drawable content area. Computed by compute_layout()
-# and reused whenever we need to draw a cell or figure out which cell
-# the player clicked.
-board_origin = (0, 0)
-new_game_button_rect = None
-change_size_button_rect = None
-content_width = 0
-content_height = 0
-
-# The equivalent layout information for the difficulty-selection menu.
-menu_title_pos = (0, 0)
-menu_subtitle_pos = (0, 0)
-menu_option_rects = []
-menu_content_width = 0
-menu_content_height = 0
-
-
-# ------------------------------------------------------------------------
-# BOARD CREATION
-# ------------------------------------------------------------------------
-def create_board(size):
-    """
-    Create an empty size x size NumPy array filled with zeros.
-    Every cell starts as "0 nearby mines" until mines are placed and
-    the neighboring mine counts are calculated.
-    """
-    new_board = np.zeros((size, size), dtype=int)
-    return new_board
-
-
-def place_mines(board, size, num_mines):
-    """
-    Randomly choose num_mines unique positions on the board and mark
-    them as mines using MINE_VALUE (-1).
-
-    We build a list of every possible (row, col) position, then use
-    random.sample to pick num_mines of them without repeats.
-    """
-    all_positions = []
-    for row in range(size):
-        for col in range(size):
-            all_positions.append((row, col))
-
-    mine_positions = random.sample(all_positions, num_mines)
-
-    for (row, col) in mine_positions:
-        board[row][col] = MINE_VALUE
-
-    return mine_positions
-
-
-def count_adjacent_mines(board, size):
-    """
-    Fill in the number of neighboring mines for every safe cell.
-
-    For each cell that is NOT a mine, we look at its eight possible
-    neighbors (up, down, left, right, and the four diagonals) and count
-    how many of them contain a mine. That count is stored in the cell.
-
-    Cells that are mines are left unchanged (they stay as MINE_VALUE).
-    """
-    for row in range(size):
-        for col in range(size):
-            if board[row][col] == MINE_VALUE:
-                continue  # Skip mines; they don't need a neighbor count
-
-            mine_count = 0
-            for row_offset in [-1, 0, 1]:
-                for col_offset in [-1, 0, 1]:
-                    if row_offset == 0 and col_offset == 0:
-                        continue  # Skip the cell itself
-
-                    neighbor_row = row + row_offset
-                    neighbor_col = col + col_offset
-
-                    # Stay inside the board (important at edges/corners)
-                    if 0 <= neighbor_row < size and 0 <= neighbor_col < size:
-                        if board[neighbor_row][neighbor_col] == MINE_VALUE:
-                            mine_count += 1
-
-            board[row][col] = mine_count
-
-
-# ------------------------------------------------------------------------
-# GAME LOGIC
-# ------------------------------------------------------------------------
-def check_win():
-    """
-    Check whether the player has won the game.
-
-    The player wins when every SAFE cell has been revealed:
-
-        revealed_safe_cells == total_cells - number_of_mines
-
-    Returns True if the win condition is met, otherwise False.
-    """
-    revealed_safe_cells = 0
-    for row in range(BOARD_SIZE):
-        for col in range(BOARD_SIZE):
-            if revealed[row][col]:
-                revealed_safe_cells += 1
-
-    total_cells = BOARD_SIZE * BOARD_SIZE
-    return revealed_safe_cells == total_cells - NUMBER_OF_MINES
-
-
-def flood_reveal(row, col):
-    """
-    Reveal the cell at (row, col). If it has zero neighboring mines,
-    this is the classic Minesweeper "flood fill": we keep revealing its
-    neighbors outward, since a 0 means none of them can be a mine
-    either. The expansion stops as soon as it reaches a numbered cell.
-    Flagged cells are left untouched.
-    """
-    cells_to_check = [(row, col)]
-
-    while cells_to_check:
-        current_row, current_col = cells_to_check.pop()
-
-        if revealed[current_row][current_col] or flagged[current_row][current_col]:
-            continue
-
-        revealed[current_row][current_col] = True
-
-        if board[current_row][current_col] != 0:
-            continue  # Only cells with 0 nearby mines expand further
-
-        for row_offset in [-1, 0, 1]:
-            for col_offset in [-1, 0, 1]:
-                if row_offset == 0 and col_offset == 0:
-                    continue
-
-                neighbor_row = current_row + row_offset
-                neighbor_col = current_col + col_offset
-
-                if 0 <= neighbor_row < BOARD_SIZE and 0 <= neighbor_col < BOARD_SIZE:
-                    if not revealed[neighbor_row][neighbor_col]:
-                        cells_to_check.append((neighbor_row, neighbor_col))
-
-
-def on_left_click(row, col):
-    """
-    Handle a left-click on the cell at (row, col).
-
-    - Ignored if the game has already ended, the cell is flagged, or the
-      cell is already revealed (a cell cannot be selected twice).
-    - If the cell is a mine: end the game (loss) and remember which mine.
-    - If the cell is safe: reveal it (and any connected safe cells) and
-      check if the player has won.
-    """
-    global game_over, mine_hit, status_message
-
-    if game_over or flagged[row][col] or revealed[row][col]:
-        return  # Invalid selection: do nothing
-
-    if board[row][col] == MINE_VALUE:
-        mine_hit = (row, col)
-        game_over = True
-        status_message = "Game over! You hit a mine."
-    else:
-        flood_reveal(row, col)
-        if check_win():
-            game_over = True
-            status_message = "Congratulations, YOU WIN!"
-        else:
-            status_message = "Safe cell!"
-
-
-def on_right_click(row, col):
-    """
-    Handle a right-click (or Control-click) on the cell at (row, col):
-    toggle a flag on or off. Flags mark cells the player suspects
-    contain a mine, and cannot be placed on already-revealed cells.
-    """
-    if game_over or revealed[row][col]:
-        return  # Invalid selection: do nothing
-
-    flagged[row][col] = not flagged[row][col]
-
-
-def count_flags():
-    """Count how many cells are currently flagged."""
-    flag_total = 0
-    for row in range(BOARD_SIZE):
-        for col in range(BOARD_SIZE):
-            if flagged[row][col]:
-                flag_total += 1
-    return flag_total
-
-
-def choose_difficulty(option):
-    """
-    Apply the chosen board size/mine count and start a brand new game.
-    `option` is one of the dictionaries in DIFFICULTY_OPTIONS.
-    """
-    global BOARD_SIZE, NUMBER_OF_MINES
-
-    BOARD_SIZE = option["size"]
-    NUMBER_OF_MINES = option["mines"]
-    reset_game()
-
-
-def reset_game():
-    """
-    Start a brand new game at the current BOARD_SIZE / NUMBER_OF_MINES:
-    create a fresh board, place new mines, recalculate neighbor counts,
-    and clear the revealed/flagged state.
-    """
-    global board, revealed, flagged, game_over, mine_hit, status_message
-
-    board = create_board(BOARD_SIZE)
-    place_mines(board, BOARD_SIZE, NUMBER_OF_MINES)
-    count_adjacent_mines(board, BOARD_SIZE)
-
-    revealed = [[False for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
-    flagged = [[False for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
-    game_over = False
-    mine_hit = None
-    status_message = "Good luck!"
-
-
-# ------------------------------------------------------------------------
-# LAYOUT
-# ------------------------------------------------------------------------
-def compute_layout(scale):
-    """
-    Recompute every pixel size and screen position of the GAME screen
-    for the given scale factor, so the whole interface grows or shrinks
-    smoothly as the player resizes the window. Returns the (width,
-    height) of the drawable content area at that scale.
-    """
-    global CELL_SIZE, CELL_GAP, BOARD_PADDING, MARGIN, SECTION_GAP
-    global TITLE_HEIGHT, SUBTITLE_HEIGHT, INFO_HEIGHT, STATUS_HEIGHT
-    global BUTTON_WIDTH, BUTTON_HEIGHT, BUTTON_GAP
-    global board_origin, new_game_button_rect, change_size_button_rect
-    global title_pos, subtitle_pos, info_y, panel_rect, status_pos
-    global content_width, content_height
-
-    def scaled(value):
-        return max(1, round(value * scale))
-
-    CELL_SIZE = scaled(BASE_CELL_SIZE)
-    CELL_GAP = scaled(BASE_CELL_GAP)
-    BOARD_PADDING = scaled(BASE_BOARD_PADDING)
-    MARGIN = scaled(BASE_MARGIN)
-    SECTION_GAP = scaled(BASE_SECTION_GAP)
-    TITLE_HEIGHT = scaled(BASE_TITLE_HEIGHT)
-    SUBTITLE_HEIGHT = scaled(BASE_SUBTITLE_HEIGHT)
-    INFO_HEIGHT = scaled(BASE_INFO_HEIGHT)
-    STATUS_HEIGHT = scaled(BASE_STATUS_HEIGHT)
-    BUTTON_WIDTH = scaled(BASE_BUTTON_WIDTH)
-    BUTTON_HEIGHT = scaled(BASE_BUTTON_HEIGHT)
-    BUTTON_GAP = scaled(BASE_BUTTON_GAP)
-
-    board_pixels = BOARD_SIZE * CELL_SIZE + (BOARD_SIZE - 1) * CELL_GAP
-    panel_size = board_pixels + 2 * BOARD_PADDING
-
-    buttons_width = 2 * BUTTON_WIDTH + BUTTON_GAP
-    window_width = max(panel_size + 2 * MARGIN, buttons_width + 2 * MARGIN)
-
-    y = MARGIN
-    title_pos = (window_width // 2, y + TITLE_HEIGHT // 2)
-    y += TITLE_HEIGHT
-
-    subtitle_pos = (window_width // 2, y + SUBTITLE_HEIGHT // 2)
-    y += SUBTITLE_HEIGHT + SECTION_GAP
-
-    info_y = y
-    y += INFO_HEIGHT + SECTION_GAP
-
-    panel_rect = pygame.Rect((window_width - panel_size) // 2, y, panel_size, panel_size)
-    board_origin = (panel_rect.x + BOARD_PADDING, panel_rect.y + BOARD_PADDING)
-    y += panel_size + SECTION_GAP
-
-    status_pos = (window_width // 2, y + STATUS_HEIGHT // 2)
-    y += STATUS_HEIGHT + SECTION_GAP
-
-    buttons_start_x = (window_width - buttons_width) // 2
-    new_game_button_rect = pygame.Rect(buttons_start_x, y, BUTTON_WIDTH, BUTTON_HEIGHT)
-    change_size_button_rect = pygame.Rect(
-        buttons_start_x + BUTTON_WIDTH + BUTTON_GAP, y, BUTTON_WIDTH, BUTTON_HEIGHT
-    )
-    y += BUTTON_HEIGHT + MARGIN
-
-    content_width, content_height = window_width, y
-    return content_width, content_height
-
-
-def compute_menu_layout(scale):
-    """
-    Recompute every pixel size and screen position of the difficulty
-    MENU for the given scale factor. Returns the (width, height) of the
-    drawable content area at that scale.
-    """
-    global menu_title_pos, menu_subtitle_pos, menu_option_rects
-    global menu_content_width, menu_content_height
-
-    def scaled(value):
-        return max(1, round(value * scale))
-
-    margin = scaled(BASE_MARGIN)
-    title_height = scaled(BASE_TITLE_HEIGHT)
-    subtitle_height = scaled(BASE_SUBTITLE_HEIGHT)
-    section_gap = scaled(BASE_SECTION_GAP)
-    button_width = scaled(BASE_MENU_BUTTON_WIDTH)
-    button_height = scaled(BASE_MENU_BUTTON_HEIGHT)
-    button_gap = scaled(BASE_MENU_BUTTON_GAP)
-
-    window_width = button_width + 2 * margin
-
-    y = margin
-    menu_title_pos = (window_width // 2, y + title_height // 2)
-    y += title_height
-
-    menu_subtitle_pos = (window_width // 2, y + subtitle_height // 2)
-    y += subtitle_height + section_gap
-
-    menu_option_rects = []
-    for _ in DIFFICULTY_OPTIONS:
-        rect = pygame.Rect((window_width - button_width) // 2, y, button_width, button_height)
-        menu_option_rects.append(rect)
-        y += button_height + button_gap
-
-    y += margin - button_gap  # Replace the last button's gap with the bottom margin
-
-    menu_content_width, menu_content_height = window_width, y
-    return menu_content_width, menu_content_height
-
-
-def compute_scale(screen_size, base_width, base_height):
-    """
-    Work out how much to scale the interface so it fits the current
-    window size, without distorting its proportions.
-    """
-    width_ratio = screen_size[0] / base_width
-    height_ratio = screen_size[1] / base_height
-    scale = min(width_ratio, height_ratio)
-    return max(MIN_SCALE, min(MAX_SCALE, scale))
-
-
-def initial_scale_for(base_width, base_height):
-    """
-    Pick a starting scale so the initial window comfortably fits the
-    player's screen, even for the larger board sizes.
-    """
-    display_info = pygame.display.Info()
-    max_width = display_info.current_w * 0.85
-    max_height = display_info.current_h * 0.85
-    scale = min(1.0, max_width / base_width, max_height / base_height)
-    return max(MIN_SCALE, min(MAX_SCALE, scale))
-
-
-def get_cell_rect(row, col):
-    """Return the pygame.Rect occupied by the cell at (row, col)."""
-    step = CELL_SIZE + CELL_GAP
-    x = board_origin[0] + col * step
-    y = board_origin[1] + row * step
-    return pygame.Rect(x, y, CELL_SIZE, CELL_SIZE)
-
-
-def get_cell_at_pos(pos):
-    """
-    Translate a content-area position into a (row, col) board
-    coordinate. Returns None if the position is outside the grid or in
-    the small gap between two cells.
-    """
-    x, y = pos
-    step = CELL_SIZE + CELL_GAP
-
-    rel_x = x - board_origin[0]
-    rel_y = y - board_origin[1]
-    if rel_x < 0 or rel_y < 0:
+class HexGrid:
+    """Hexagonal board: each cell touches 6 neighbours."""
+
+    def __init__(self, cols, rows):
+        self.cols = cols
+        self.rows = rows
+        fit_w = MAX_VIEW_W / (SQRT3 * (cols + 0.5))
+        fit_h = MAX_VIEW_H / (1.5 * rows + 0.5)
+        self.R = max(MIN_HEXR, min(BASE_HEXR, fit_w, fit_h))
+
+    def coords(self):
+        for r in range(self.rows):
+            for c in range(self.cols):
+                yield (c, r)
+
+    def in_bounds(self, c, r):
+        return 0 <= c < self.cols and 0 <= r < self.rows
+
+    def neighbours(self, c, r):
+        diffs = ODDR_NEIGHBOURS[r & 1]
+        return [(c + dc, r + dr) for dc, dr in diffs if self.in_bounds(c + dc, r + dr)]
+
+    def center(self, c, r):
+        x = self.R * SQRT3 * (c + 0.5 * (r & 1) + 0.5)
+        y = self.R * (1 + 1.5 * r)
+        return (x, y)
+
+    def polygon(self, c, r):
+        cx, cy = self.center(c, r)
+        pts = []
+        for i in range(6):
+            ang = math.radians(60 * i - 90)
+            pts.append((cx + self.R * math.cos(ang), cy + self.R * math.sin(ang)))
+        return pts
+
+    def pixel_size(self):
+        w = math.ceil(self.R * SQRT3 * (self.cols + 0.5))
+        h = math.ceil(self.R * (1.5 * self.rows + 0.5))
+        return (w, h)
+
+    def inradius(self):
+        return self.R * SQRT3 / 2
+
+    def cell_at(self, px, py):
+        # In a hex grid the hexagon is the region closest to its center,
+        # so it is enough to find the nearest center.
+        best, best_d = None, float("inf")
+        for cell in self.coords():
+            cx, cy = self.center(*cell)
+            d = (cx - px) ** 2 + (cy - py) ** 2
+            if d < best_d:
+                best, best_d = cell, d
+        if best is not None and best_d <= (self.R * 1.2) ** 2:
+            return best
         return None
 
-    col = rel_x // step
-    row = rel_y // step
-    if not (0 <= row < BOARD_SIZE and 0 <= col < BOARD_SIZE):
-        return None
 
-    if (rel_x % step) >= CELL_SIZE or (rel_y % step) >= CELL_SIZE:
-        return None  # Clicked in the gap between cells
+# ------------------------------------------------------------------------
+# GAME MODEL
+# ------------------------------------------------------------------------
+class Tile:
+    __slots__ = ("type", "revealed", "flagged", "number", "wrong")
 
-    return int(row), int(col)
+    def __init__(self):
+        self.type = "."
+        self.revealed = False
+        self.flagged = False
+        self.number = 0
+        self.wrong = False       # wrong flag (shown when you lose)
+
+
+class Board:
+    def __init__(self, grid, mines):
+        self.grid = grid
+        self.mines = mines
+        self.tiles = {cell: Tile() for cell in grid.coords()}
+        self.mines_placed = False
+        self.detonated = None
+        self.dug = set()
+
+    def place_mines(self, safe_cell):
+        forbidden = {safe_cell} | set(self.grid.neighbours(*safe_cell))
+        candidates = [c for c in self.grid.coords() if c not in forbidden]
+        target = min(self.mines, len(candidates))
+        for cell in random.sample(candidates, target):
+            self.tiles[cell].type = "X"
+        self.mines = target
+
+        for cell in self.grid.coords():
+            tile = self.tiles[cell]
+            if tile.type == "X":
+                continue
+            n = sum(1 for nb in self.grid.neighbours(*cell)
+                    if self.tiles[nb].type == "X")
+            tile.number = n
+            tile.type = "C" if n > 0 else "."
+        self.mines_placed = True
+
+    def dig(self, cell):
+        """Reveal the cell (and flood empty areas). False if it was a mine."""
+        if not self.mines_placed:
+            self.place_mines(cell)
+
+        stack = [cell]
+        while stack:
+            cur = stack.pop()
+            if cur in self.dug:
+                continue
+            tile = self.tiles[cur]
+            if tile.flagged:
+                continue
+            self.dug.add(cur)
+            tile.revealed = True
+
+            if tile.type == "X":
+                self.detonated = cur
+                return False
+            if tile.number > 0:
+                continue
+            for nb in self.grid.neighbours(*cur):
+                if nb not in self.dug:
+                    stack.append(nb)
+        return True
+
+    def flags_used(self):
+        return sum(1 for t in self.tiles.values() if t.flagged)
+
+    def reveal_all_mines(self):
+        for tile in self.tiles.values():
+            if tile.type == "X" and not tile.flagged:
+                tile.revealed = True
+            elif tile.flagged and tile.type != "X":
+                tile.flagged = False
+                tile.revealed = True
+                tile.wrong = True
+
+    def is_won(self):
+        return all(t.revealed for t in self.tiles.values() if t.type != "X")
 
 
 # ------------------------------------------------------------------------
-# DRAWING HELPERS
+# DRAWING
 # ------------------------------------------------------------------------
-def shade(color, amount):
-    """Return `color` shifted lighter (positive amount) or darker (negative)."""
-    return tuple(max(0, min(255, channel + amount)) for channel in color)
+def load_image(names):
+    """Return a Surface for the first matching file in assets/, or None."""
+    for name in names:
+        path = os.path.join(ASSETS_DIR, name)
+        if os.path.isfile(path):
+            try:
+                return pygame.image.load(path).convert_alpha()
+            except pygame.error:
+                pass
+    return None
 
 
-def draw_raised_cell(surface, rect, color):
-    """Draw a covered cell with a simple beveled (3D) look."""
-    pygame.draw.rect(surface, color, rect)
-    light = shade(color, 45)
-    dark = shade(color, -45)
-    pygame.draw.line(surface, light, rect.topleft, (rect.right - 1, rect.top), 2)
-    pygame.draw.line(surface, light, rect.topleft, (rect.left, rect.bottom - 1), 2)
-    pygame.draw.line(surface, dark, (rect.left, rect.bottom - 1), (rect.right - 1, rect.bottom - 1), 2)
-    pygame.draw.line(surface, dark, (rect.right - 1, rect.top), (rect.right - 1, rect.bottom - 1), 2)
+class _Sprite:
+    """An optional image, cached at whatever size it is last drawn at."""
+
+    def __init__(self, image):
+        self.image = image
+        self._scaled = None
+        self._box = 0
+
+    def get(self, box):
+        if self.image is None:
+            return None
+        if self._scaled is None or self._box != box:
+            iw, ih = self.image.get_size()
+            k = min(box / iw, box / ih)
+            self._scaled = pygame.transform.smoothscale(
+                self.image, (max(1, int(iw * k)), max(1, int(ih * k))))
+            self._box = box
+        return self._scaled
+
+    def blit(self, screen, cx, cy, box):
+        spr = self.get(box)
+        if spr is None:
+            return False
+        screen.blit(spr, (cx - spr.get_width() / 2, cy - spr.get_height() / 2))
+        return True
 
 
-def draw_mine_icon(surface, rect):
-    """Draw a simple mine (a spiked ball). No emoji involved."""
-    center = rect.center
-    radius = min(rect.width, rect.height) // 4
+class CellRenderer:
+    """Draws the board procedurally. Works for any cell shape (square or
+    hexagonal): it asks the grid for each cell's polygon, center and
+    "inradius", then paints the contents on top. If images are provided
+    they are blitted for the bull / flag instead of the drawn shapes."""
 
-    for angle_degrees in range(0, 360, 45):
-        angle = math.radians(angle_degrees)
-        end_point = (
-            center[0] + int(radius * 1.7 * math.cos(angle)),
-            center[1] + int(radius * 1.7 * math.sin(angle)),
-        )
-        pygame.draw.line(surface, BLACK, center, end_point, 2)
+    def __init__(self, mine_img=None, flag_img=None):
+        self.mine = _Sprite(mine_img)
+        self.flag = _Sprite(flag_img)
 
-    pygame.draw.circle(surface, BLACK, center, radius)
-    highlight = (center[0] - radius // 3, center[1] - radius // 3)
-    pygame.draw.circle(surface, WHITE, highlight, max(1, radius // 4))
+    def _draw_mine(self, screen, cx, cy, u):
+        if not self.mine.blit(screen, cx, cy, int(u * 1.9)):
+            self._bull(screen, cx, cy, u)
 
+    def _draw_flag(self, screen, cx, cy, u):
+        if not self.flag.blit(screen, cx, cy, int(u * 1.7)):
+            self._flag(screen, cx, cy, u)
 
-def draw_flag_icon(surface, rect):
-    """Draw a simple flag on a pole. No emoji involved."""
-    pole_x = rect.left + rect.width // 3
-    pole_top = rect.top + rect.height // 5
-    pole_bottom = rect.bottom - rect.height // 5
+    def draw(self, screen, board, grid, ox, oy):
+        s = grid.inradius()                       # half a cell; scales the contents
+        font = pygame.font.SysFont("Arial", max(10, int(s * 1.5)), bold=True)
 
-    pygame.draw.line(surface, BLACK, (pole_x, pole_top), (pole_x, pole_bottom), 3)
-    pygame.draw.line(
-        surface, BLACK,
-        (pole_x - rect.width // 5, pole_bottom),
-        (pole_x + rect.width // 5, pole_bottom),
-        3,
-    )
+        for cell in grid.coords():
+            t = board.tiles[cell]
+            cx, cy = grid.center(*cell)
+            cx += ox
+            cy += oy
+            # shrink the cell toward its center -> a thin, borderless gap
+            poly = [(cx + (x + ox - cx) * CELL_GAP, cy + (y + oy - cy) * CELL_GAP)
+                    for x, y in grid.polygon(*cell)]
 
-    flag_points = [
-        (pole_x, pole_top),
-        (pole_x + rect.width // 3, pole_top + rect.height // 6),
-        (pole_x, pole_top + rect.height // 3),
-    ]
-    pygame.draw.polygon(surface, LOSING_MINE_COLOR, flag_points)
+            if not t.revealed:
+                fill = CELL_COVER
+            elif t.type == "X" and cell == board.detonated:
+                fill = CELL_EXPLODE
+            else:
+                fill = CELL_REVEAL
+            pygame.draw.polygon(screen, fill, poly)
 
+            if t.flagged and not t.revealed:
+                self._draw_flag(screen, cx, cy, s)
+            elif t.revealed and t.wrong:
+                self._draw_mine(screen, cx, cy, s)
+                self._cross(screen, cx, cy, s)
+            elif t.revealed and t.type == "X":
+                self._draw_mine(screen, cx, cy, s)
+            elif t.revealed and t.number > 0:
+                surf = font.render(str(t.number), True, NUMBER_COLORS[t.number])
+                screen.blit(surf, (cx - surf.get_width() / 2,
+                                   cy - surf.get_height() / 2))
 
-def draw_text(surface, font, text, color, center):
-    """Render `text` with `font` and blit it centered at `center`."""
-    text_surface = font.render(text, True, color)
-    surface.blit(text_surface, text_surface.get_rect(center=center))
+    @staticmethod
+    def _curve(surf, color, p0, p1, p2, width, steps=16):
+        """Draw a quadratic Bezier as a thick polyline."""
+        pts = []
+        for i in range(steps + 1):
+            t = i / steps
+            k = 1 - t
+            pts.append((k * k * p0[0] + 2 * k * t * p1[0] + t * t * p2[0],
+                        k * k * p0[1] + 2 * k * t * p1[1] + t * t * p2[1]))
+        pygame.draw.lines(surf, color, False, pts, width)
 
+    @classmethod
+    def _bull(cls, s, cx, cy, u):
+        """A Texas Longhorn (Bevo) head - the "mine"."""
+        dark = UT_CHARCOAL
+        w = max(2, int(u / 5))
 
-# ------------------------------------------------------------------------
-# MAIN DRAWING ROUTINE
-# ------------------------------------------------------------------------
-def draw_cell(surface, fonts, row, col):
-    """Draw a single cell according to the current game state."""
-    rect = get_cell_rect(row, col)
-    value = board[row][col]
-    is_mine = value == MINE_VALUE
+        # Horns: sweep out from the top of the head and curl upward.
+        for sd in (-1, 1):
+            cls._curve(s, dark,
+                       (cx + sd * u * 0.08, cy - u * 0.28),
+                       (cx + sd * u * 0.85, cy - u * 0.02),
+                       (cx + sd * u * 0.92, cy - u * 0.62), w)
+            pygame.draw.circle(s, dark,
+                               (int(cx + sd * u * 0.92), int(cy - u * 0.62)),
+                               max(1, w // 2))
 
-    if game_over and is_mine:
-        color = LOSING_MINE_COLOR if mine_hit == (row, col) else MINE_COLOR
-        pygame.draw.rect(surface, color, rect)
-        draw_mine_icon(surface, rect)
-    elif revealed[row][col]:
-        pygame.draw.rect(surface, REVEALED_COLOR, rect)
-        if value > 0:
-            draw_text(surface, fonts["cell"], str(value), NUMBER_COLORS.get(value, BLACK), rect.center)
-    else:
-        base_color = FLAG_COLOR if flagged[row][col] else COVERED_COLOR
-        draw_raised_cell(surface, rect, base_color)
-        if flagged[row][col]:
-            draw_flag_icon(surface, rect)
+        # Ears, behind the head.
+        for sd in (-1, 1):
+            pygame.draw.circle(s, UT_ORANGE,
+                               (int(cx + sd * u * 0.5), int(cy - u * 0.02)),
+                               max(2, int(u * 0.17)))
 
-    pygame.draw.rect(surface, BORDER_COLOR, rect, 1)
+        # Head (rounded muzzle) with a charcoal ring so it reads on any cell.
+        head = pygame.Rect(0, 0, int(u * 0.92), int(u * 1.05))
+        head.center = (int(cx), int(cy + u * 0.16))
+        pygame.draw.ellipse(s, dark, head.inflate(w, w))
+        pygame.draw.ellipse(s, UT_ORANGE, head)
 
+        # Eyes and nostrils.
+        for sd in (-1, 1):
+            pygame.draw.circle(s, dark, (int(cx + sd * u * 0.24), int(cy - u * 0.04)),
+                               max(1, int(u * 0.08)))
+            pygame.draw.circle(s, dark, (int(cx + sd * u * 0.16), int(cy + u * 0.42)),
+                               max(1, int(u * 0.09)))
 
-def draw_buttons(surface, fonts, mouse_pos):
-    """Draw the 'New Game' and 'Change Size' buttons, highlighting hovered ones."""
-    is_hovered = new_game_button_rect.collidepoint(mouse_pos)
-    color = BUTTON_HOVER_COLOR if is_hovered else BUTTON_COLOR
-    pygame.draw.rect(surface, color, new_game_button_rect, border_radius=8)
-    draw_text(surface, fonts["info"], "New Game", WHITE, new_game_button_rect.center)
+    @staticmethod
+    def _flag(s, cx, cy, u):
+        w = max(2, int(u / 6))
+        # charcoal pole + burnt-orange pennant
+        pygame.draw.line(s, INK, (cx, cy - u * 0.55), (cx, cy + u * 0.55), w)
+        pygame.draw.polygon(s, ACCENT,
+                            [(cx, cy - u * 0.55), (cx, cy - u * 0.05),
+                             (cx + u * 0.55, cy - u * 0.3)])
+        pygame.draw.line(s, INK,
+                         (cx - u * 0.45, cy + u * 0.55),
+                         (cx + u * 0.45, cy + u * 0.55), w)
 
-    is_hovered = change_size_button_rect.collidepoint(mouse_pos)
-    color = SECONDARY_BUTTON_HOVER_COLOR if is_hovered else SECONDARY_BUTTON_COLOR
-    pygame.draw.rect(surface, color, change_size_button_rect, border_radius=8)
-    draw_text(surface, fonts["info"], "Change Size", WHITE, change_size_button_rect.center)
-
-
-def draw_window(surface, fonts, mouse_pos):
-    """Draw the entire game content area: title, info bar, board, status, buttons."""
-    surface.fill(BG_COLOR)
-
-    draw_text(surface, fonts["title"], "MINESWEEPER", TEXT_COLOR, title_pos)
-    draw_text(
-        surface, fonts["subtitle"],
-        "Left click: Reveal a cell   |   Right click / Control-click: Place a flag",
-        TEXT_COLOR, subtitle_pos,
-    )
-
-    window_width = surface.get_width()
-    draw_text(
-        surface, fonts["info"], "Mines: " + str(NUMBER_OF_MINES), TEXT_COLOR,
-        (window_width // 2 - 90, info_y + INFO_HEIGHT // 2),
-    )
-    draw_text(
-        surface, fonts["info"], "Flags: " + str(count_flags()), TEXT_COLOR,
-        (window_width // 2 + 90, info_y + INFO_HEIGHT // 2),
-    )
-
-    pygame.draw.rect(surface, PANEL_COLOR, panel_rect, border_radius=6)
-    for row in range(BOARD_SIZE):
-        for col in range(BOARD_SIZE):
-            draw_cell(surface, fonts, row, col)
-
-    draw_text(surface, fonts["status"], status_message, TEXT_COLOR, status_pos)
-    draw_buttons(surface, fonts, mouse_pos)
-
-
-def draw_menu(surface, fonts, mouse_pos):
-    """Draw the difficulty-selection menu: title, subtitle, and size buttons."""
-    surface.fill(BG_COLOR)
-
-    draw_text(surface, fonts["title"], "MINESWEEPER", TEXT_COLOR, menu_title_pos)
-    draw_text(
-        surface, fonts["subtitle"], "Choose a board size to begin",
-        TEXT_COLOR, menu_subtitle_pos,
-    )
-
-    for option, rect in zip(DIFFICULTY_OPTIONS, menu_option_rects):
-        is_hovered = rect.collidepoint(mouse_pos)
-        color = BUTTON_HOVER_COLOR if is_hovered else BUTTON_COLOR
-        pygame.draw.rect(surface, color, rect, border_radius=8)
-        draw_text(surface, fonts["info"], option["label"], WHITE, rect.center)
-
-
-def build_fonts(scale):
-    """Build every font used by the UI, sized for the given scale factor."""
-    def size(base_size):
-        return max(8, round(base_size * scale))
-
-    return {
-        "title": pygame.font.SysFont("helvetica", size(BASE_TITLE_FONT_SIZE), bold=True),
-        "subtitle": pygame.font.SysFont("helvetica", size(BASE_SUBTITLE_FONT_SIZE)),
-        "info": pygame.font.SysFont("helvetica", size(BASE_INFO_FONT_SIZE), bold=True),
-        "cell": pygame.font.SysFont("helvetica", size(BASE_CELL_FONT_SIZE), bold=True),
-        "status": pygame.font.SysFont("helvetica", size(BASE_STATUS_FONT_SIZE), italic=True),
-    }
+    @staticmethod
+    def _cross(s, cx, cy, u):
+        w = max(2, int(u / 5))
+        pygame.draw.line(s, (193, 55, 43), (cx - u * 0.45, cy - u * 0.45),
+                         (cx + u * 0.45, cy + u * 0.45), w)
+        pygame.draw.line(s, (193, 55, 43), (cx - u * 0.45, cy + u * 0.45),
+                         (cx + u * 0.45, cy - u * 0.45), w)
 
 
 # ------------------------------------------------------------------------
-# PROGRAM ENTRY POINT
+# NUMERIC TEXT FIELD (for the menu)
 # ------------------------------------------------------------------------
-def main():
-    pygame.init()
-    pygame.display.set_caption("Minesweeper")
+class NumberField:
+    def __init__(self, rect, value, lo, hi):
+        self.rect = pygame.Rect(rect)
+        self.text = str(value)
+        self.lo = lo
+        self.hi = hi
+        self.active = False
 
-    menu_base_width, menu_base_height = compute_menu_layout(1.0)
-    initial_scale = initial_scale_for(menu_base_width, menu_base_height)
-    screen = pygame.display.set_mode(
-        compute_menu_layout(initial_scale), pygame.RESIZABLE
-    )
+    def handle(self, event, pos):
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            self.active = self.rect.collidepoint(pos)
+        elif event.type == pygame.KEYDOWN and self.active:
+            if event.key == pygame.K_BACKSPACE:
+                self.text = self.text[:-1]
+            elif event.unicode.isdigit() and len(self.text) < 4:
+                self.text += event.unicode
 
-    app_state = "menu"          # "menu" while picking a size, "game" while playing
-    base_width, base_height = menu_base_width, menu_base_height
-    current_scale = initial_scale
-    fonts = build_fonts(current_scale)
+    def value(self):
+        try:
+            v = int(self.text)
+        except ValueError:
+            v = self.lo
+        return max(self.lo, min(self.hi, v))
 
-    clock = pygame.time.Clock()
-    running = True
-    while running:
-        # Recompute the layout every frame so resizing the window feels
-        # instantaneous. Fonts are only rebuilt when the scale actually
-        # changes, since font creation is comparatively expensive.
-        scale = compute_scale(screen.get_size(), base_width, base_height)
-        if abs(scale - current_scale) > 0.01:
-            current_scale = scale
-            fonts = build_fonts(current_scale)
-
-        if app_state == "menu":
-            content_width, content_height = compute_menu_layout(current_scale)
+    def draw(self, screen, font):
+        # minimal: just the number and a thin underline
+        x = self.rect.x + 4 * SS
+        if self.text:
+            shown, col = self.text, INK
         else:
-            content_width, content_height = compute_layout(current_scale)
+            shown, col = ("" if self.active else "0"), MUTED
+        surf = font.render(shown, True, col)
+        screen.blit(surf, (x, self.rect.centery - surf.get_height() // 2))
+        pygame.draw.line(screen, ACCENT if self.active else (205, 200, 188),
+                         (self.rect.x, self.rect.bottom),
+                         (self.rect.right, self.rect.bottom), 2 * SS)
+        # blinking text caret while this field is being edited
+        if self.active and (pygame.time.get_ticks() // 500) % 2 == 0:
+            cx = x + (surf.get_width() if self.text else 0) + 2 * SS
+            ch = font.get_height()
+            pygame.draw.line(screen, INK, (cx, self.rect.centery - ch // 2),
+                             (cx, self.rect.centery + ch // 2), 2 * SS)
 
-        # The content area is centered inside the window and letterboxed
-        # (rather than stretched) so cells and buttons always stay
-        # correctly proportioned.
-        offset = (
-            (screen.get_width() - content_width) // 2,
-            (screen.get_height() - content_height) // 2,
-        )
 
+# ------------------------------------------------------------------------
+# GAME
+# ------------------------------------------------------------------------
+class Game:
+    def __init__(self):
+        pygame.init()
+        pygame.display.set_caption(TITLE)
+        self.clock = pygame.time.Clock()
+        self.font = pygame.font.SysFont("Arial", 22 * SS, bold=True)
+        self.big_font = pygame.font.SysFont("Arial", 40 * SS, bold=True)
+        self.small_font = pygame.font.SysFont("Arial", 17 * SS)
+        self._resize(560 * SS, 470 * SS)
+        self.mine_img = load_image(MINE_IMAGE_NAMES)
+        self.flag_img = load_image(FLAG_IMAGE_NAMES)
+
+    def _resize(self, canvas_w, canvas_h):
+        """Create the large canvas (where we draw) and the real window."""
+        self.canvas_w, self.canvas_h = canvas_w, canvas_h
+        self.screen = pygame.Surface((canvas_w, canvas_h))
+        self.win = pygame.display.set_mode((round(canvas_w / SS),
+                                            round(canvas_h / SS)))
+
+    def _present(self):
+        """Scale the canvas down to the window with smoothing and show it."""
+        pygame.transform.smoothscale(self.screen, self.win.get_size(), self.win)
+        pygame.display.flip()
+
+    def _mouse(self, pos):
+        """Convert a mouse position (window) to canvas coordinates."""
+        return (pos[0] * SS, pos[1] * SS)
+
+    # -- menu -------------------------------------------------------------
+    def menu(self):
+        W, H = 520 * SS, 470 * SS
+        self._resize(W, H)
+        mid = W // 2
+        mode = "square"
+
+        label_font = pygame.font.SysFont("Arial", 14 * SS)
+        title_font = pygame.font.SysFont("Arial", 38 * SS, bold=True)
+        title_lines = ["HOOK 'EM", "SWEEPER"]
+
+        r_sq = pygame.Rect(0, 0, 150 * SS, 40 * SS)
+        r_sq.center = (mid - 88 * SS, 158 * SS)
+        r_hex = pygame.Rect(0, 0, 170 * SS, 40 * SS)
+        r_hex.center = (mid + 92 * SS, 158 * SS)
+        f_w = NumberField((mid + 12 * SS, 212 * SS, 66 * SS, 32 * SS), 12, MIN_DIM, MAX_DIM)
+        f_h = NumberField((mid + 12 * SS, 256 * SS, 66 * SS, 32 * SS), 12, MIN_DIM, MAX_DIM)
+        f_m = NumberField((mid + 12 * SS, 300 * SS, 66 * SS, 32 * SS), 30, 1, 999)
+        btn_play = pygame.Rect(0, 0, 200 * SS, 52 * SS)
+        btn_play.center = (mid, 388 * SS)
+
+        while True:
+            max_mines = max(1, f_w.value() * f_h.value() - 9)
+            f_m.hi = max_mines
+            mouse = self._mouse(pygame.mouse.get_pos())
+
+            self.screen.fill(BG)
+            ty = 30 * SS
+            for i, line in enumerate(title_lines):
+                col = ACCENT if i == 0 else INK
+                surf = title_font.render(line, True, col)
+                self.screen.blit(surf, (mid - surf.get_width() // 2, ty))
+                ty += surf.get_height() - 6 * SS
+
+            for key, text, rect in (("square", "Square", r_sq),
+                                    ("hex", "Hexagonal", r_hex)):
+                on = mode == key
+                t = self.font.render(text, True, INK if on else MUTED)
+                tx = rect.centerx - t.get_width() // 2
+                self.screen.blit(t, (tx, rect.centery - t.get_height() // 2))
+                if on:
+                    uy = rect.centery + t.get_height() // 2 + 5 * SS
+                    pygame.draw.line(self.screen, ACCENT,
+                                     (tx, uy), (tx + t.get_width(), uy), 3 * SS)
+
+            for text, field in ((f"WIDTH   {MIN_DIM}–{MAX_DIM}", f_w),
+                                (f"HEIGHT   {MIN_DIM}–{MAX_DIM}", f_h),
+                                (f"BULLS   1–{max_mines}", f_m)):
+                lt = label_font.render(text, True, MUTED)
+                self.screen.blit(lt, (mid - 16 * SS - lt.get_width(),
+                                      field.rect.centery - lt.get_height() // 2))
+                field.draw(self.screen, self.font)
+
+            pygame.draw.rect(self.screen,
+                             ACCENT_DIM if btn_play.collidepoint(mouse) else ACCENT,
+                             btn_play, border_radius=btn_play.height // 2)
+            pt = self.font.render("PLAY", True, BG)
+            self.screen.blit(pt, (btn_play.centerx - pt.get_width() // 2,
+                                  btn_play.centery - pt.get_height() // 2))
+            self._present()
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.quit()
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    self.quit()
+                pos = self._mouse(event.pos) if event.type == pygame.MOUSEBUTTONDOWN else None
+                for field in (f_w, f_h, f_m):
+                    field.handle(event, pos)
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    if r_sq.collidepoint(pos):
+                        mode = "square"
+                    elif r_hex.collidepoint(pos):
+                        mode = "hex"
+                    elif btn_play.collidepoint(pos):
+                        return {"mode": mode, "cols": f_w.value(),
+                                "rows": f_h.value(), "mines": f_m.value()}
+            self.clock.tick(FPS)
+
+    # -- a game round --------------------------------------------------
+    def new(self, cfg):
+        if cfg["mode"] == "square":
+            self.grid = SquareGrid(cfg["cols"], cfg["rows"])
+        else:
+            self.grid = HexGrid(cfg["cols"], cfg["rows"])
+        self.renderer = CellRenderer(self.mine_img, self.flag_img)
+
+        self.board = Board(self.grid, cfg["mines"])
+        gw, gh = self.grid.pixel_size()
+        canvas_w = max(MIN_WIN_W, gw)
+        self.ox = (canvas_w - gw) // 2
+        self.oy = HUD_HEIGHT
+        self._resize(canvas_w, gh + HUD_HEIGHT)
+        self.start_time = None
+        self.elapsed = 0
+        self.state = "playing"
+
+    def run(self):
+        while self.state == "playing":
+            self.clock.tick(FPS)
+            self.events()
+            if self.start_time is not None:
+                self.elapsed = int(time.time() - self.start_time)
+            self.draw()
+        self.end_screen()
+
+    def events(self):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                running = False
+                self.quit()
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    self.quit()
+                if event.key == pygame.K_r:
+                    self.state = "restart"
+                    return
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                mx, my = self._mouse(event.pos)
+                cell = self.grid.cell_at(mx - self.ox, my - self.oy)
+                if cell is None:
+                    continue
+                tile = self.board.tiles[cell]
 
-            elif event.type == pygame.VIDEORESIZE:
-                screen = pygame.display.set_mode((event.w, event.h), pygame.RESIZABLE)
+                if event.button == 1 and not tile.flagged and not tile.revealed:
+                    if self.start_time is None:
+                        self.start_time = time.time()
+                    if not self.board.dig(cell):
+                        self.board.reveal_all_mines()
+                        self.state = "lost"
+                        return
+                elif event.button == 3 and not tile.revealed:
+                    tile.flagged = not tile.flagged
 
-            elif event.type == pygame.MOUSEBUTTONDOWN and event.button in (1, 3):
-                content_pos = (event.pos[0] - offset[0], event.pos[1] - offset[1])
+                if self.board.is_won():
+                    for t in self.board.tiles.values():
+                        if t.type == "X":
+                            t.flagged = True
+                    self.state = "won"
+                    return
 
-                if app_state == "menu":
-                    for option, rect in zip(DIFFICULTY_OPTIONS, menu_option_rects):
-                        if rect.collidepoint(content_pos):
-                            choose_difficulty(option)
-                            base_width, base_height = compute_layout(1.0)
-                            initial_scale = initial_scale_for(base_width, base_height)
-                            current_scale = initial_scale
-                            fonts = build_fonts(current_scale)
-                            screen = pygame.display.set_mode(
-                                compute_layout(initial_scale), pygame.RESIZABLE
-                            )
-                            app_state = "game"
-                            break
-                else:
-                    if new_game_button_rect.collidepoint(content_pos):
-                        reset_game()
-                        continue
+    # -- drawing -----------------------------------------------------
+    def draw_hud(self):
+        # no bar: same paper color, one faint divider line
+        bulls_left = self.board.mines - self.board.flags_used()
+        left = self.font.render(f"Bulls  {bulls_left}", True, INK)
+        right = self.small_font.render(f"{self.elapsed}s", True, MUTED)
+        hint = self.small_font.render("R", True, MUTED)
+        cy = HUD_HEIGHT // 2
+        self.screen.blit(left, (16 * SS, cy - left.get_height() // 2))
+        self.screen.blit(right, (self.canvas_w - right.get_width() - 16 * SS,
+                                 cy - right.get_height() // 2))
+        self.screen.blit(hint, (self.canvas_w // 2 - hint.get_width() // 2,
+                                cy - hint.get_height() // 2))
+        pygame.draw.line(self.screen, (214, 209, 197),
+                         (0, HUD_HEIGHT - SS), (self.canvas_w, HUD_HEIGHT - SS), SS)
 
-                    if change_size_button_rect.collidepoint(content_pos):
-                        base_width, base_height = menu_base_width, menu_base_height
-                        initial_scale = initial_scale_for(base_width, base_height)
-                        current_scale = initial_scale
-                        fonts = build_fonts(current_scale)
-                        screen = pygame.display.set_mode(
-                            compute_menu_layout(initial_scale), pygame.RESIZABLE
-                        )
-                        app_state = "menu"
-                        continue
+    def _render_board(self):
+        """Draw the board onto the canvas (without showing it yet)."""
+        self.screen.fill(BGCOLOUR)
+        self.draw_hud()
+        self.renderer.draw(self.screen, self.board, self.grid, self.ox, self.oy)
 
-                    cell = get_cell_at_pos(content_pos)
-                    if cell is None:
-                        continue
-                    row, col = cell
+    def draw(self):
+        self._render_board()
+        self._present()
 
-                    control_held = pygame.key.get_mods() & pygame.KMOD_CTRL
-                    if event.button == 1 and not control_held:
-                        on_left_click(row, col)
-                    elif event.button == 3 or (event.button == 1 and control_held):
-                        on_right_click(row, col)
+    def end_screen(self):
+        if self.state == "restart":
+            return
+        won = self.state == "won"
+        msg = self.big_font.render("YOU WIN" if won else "GAME OVER", True,
+                                   GREEN if won else RED)
+        sub = self.font.render(f"Time: {self.elapsed}s", True, WHITE)
+        tip = self.small_font.render("R: play again", True, WHITE)
+        cx = self.screen.get_width() // 2
+        cy = self.screen.get_height() // 2
 
-        content_surface = pygame.Surface((content_width, content_height))
-        mouse_pos = pygame.mouse.get_pos()
-        content_mouse_pos = (mouse_pos[0] - offset[0], mouse_pos[1] - offset[1])
+        # Composed once: board + dark overlay + text.
+        self._render_board()
+        overlay = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 170))
+        self.screen.blit(overlay, (0, 0))
+        self.screen.blit(msg, (cx - msg.get_width() // 2, cy - 70 * SS))
+        self.screen.blit(sub, (cx - sub.get_width() // 2, cy - 10 * SS))
+        self.screen.blit(tip, (cx - tip.get_width() // 2, cy + 30 * SS))
 
-        if app_state == "menu":
-            draw_menu(content_surface, fonts, content_mouse_pos)
-        else:
-            draw_window(content_surface, fonts, content_mouse_pos)
+        while True:
+            self._present()
 
-        screen.fill(BG_COLOR)
-        screen.blit(content_surface, offset)
-        pygame.display.flip()
-        clock.tick(60)
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.quit()
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        self.quit()
+                    if event.key == pygame.K_r:
+                        return
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    return
+            self.clock.tick(FPS)
 
-    pygame.quit()
-    sys.exit()
+    def quit(self):
+        pygame.quit()
+        sys.exit(0)
+
+
+def main():
+    game = Game()
+    while True:
+        cfg = game.menu()
+        game.new(cfg)
+        game.run()
 
 
 if __name__ == "__main__":
